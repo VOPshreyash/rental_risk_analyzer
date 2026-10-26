@@ -5,7 +5,35 @@
  * ⚙️  CHANGE THIS to your Hugging Face Spaces URL after deployment:
  *     e.g. "https://yourusername-rental-risk-api.hf.space"
  */
-const API_BASE = "http://localhost:7860";
+// 1) After deploying the backend on Render, paste its URL here (no trailing slash):
+const RENDER_URL = "https://rental-risk-analyzer-1ao7.onrender.com";
+// 2) Opened on your own computer -> uses the local backend; opened from Vercel -> uses Render.
+const IS_LOCAL = ["localhost", "127.0.0.1", ""].includes(location.hostname);
+const API_BASE = IS_LOCAL ? "http://localhost:7860" : RENDER_URL;
+
+// Render's free plan puts the server to sleep when idle. Pinging it as soon as the page
+// opens starts waking it, so it is usually ready by the time you click Analyse.
+fetch(`${API_BASE}/api/health`).catch(() => {});
+
+// One helper for both endpoints: 2-minute timeout + friendly error messages.
+async function postJSON(path, payload) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 120000);
+  try {
+    const res = await fetch(`${API_BASE}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: ctrl.signal
+    });
+    if (!res.ok) throw new Error(`Server error ${res.status}: ${await res.text()}`);
+    return await res.json();
+  } catch (e) {
+    if (e.name === "AbortError") throw new Error("The server took too long to answer (over 2 minutes). Please try again.");
+    if (e.name === "TypeError") throw new Error("Cannot reach the backend. On Render's free plan it may still be waking up - wait a minute and try again.");
+    throw e;
+  } finally { clearTimeout(timer); }
+}
 
 // ── Tab switching ──────────────────────────────────────────────────────────
 function switchTab(tab) {
@@ -106,13 +134,7 @@ async function analyseForm() {
 
   showLoading();
   try {
-    const res  = await fetch(`${API_BASE}/api/analyze/form`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    });
-    if (!res.ok) throw new Error(`Server error ${res.status}: ${await res.text()}`);
-    const data = await res.json();
+    const data = await postJSON("/api/analyze/form", payload);
     showResults(data, true);
   } catch (e) {
     showError(e.message);
@@ -134,13 +156,7 @@ async function analyseText() {
 
   showLoading();
   try {
-    const res = await fetch(`${API_BASE}/api/analyze/text`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    });
-    if (!res.ok) throw new Error(`Server error ${res.status}: ${await res.text()}`);
-    const data = await res.json();
+    const data = await postJSON("/api/analyze/text", payload);
     showResults(data, false);
   } catch (e) {
     showError(e.message);
@@ -250,13 +266,20 @@ function toggleAgreement() {
 }
 
 // ── UI state helpers ───────────────────────────────────────────────────────
+let _wakeTimer = null;
 function hideAll() {
+  clearTimeout(_wakeTimer);
   ["idle-state","loading-state","results-state","error-state"]
     .forEach(id => document.getElementById(id).classList.add("hidden"));
 }
 function showLoading() {
   hideAll();
   document.getElementById("loading-state").classList.remove("hidden");
+  const sub = document.querySelector("#loading-state .loading-sub");
+  if (sub) sub.textContent = "Running NLP engine";
+  _wakeTimer = setTimeout(() => {
+    if (sub) sub.textContent = "Server was asleep (free plan) - waking it up, this can take up to a minute...";
+  }, 6000);
   // Disable buttons while loading
   document.querySelectorAll(".analyse-btn").forEach(b => b.disabled = true);
 }
@@ -266,9 +289,6 @@ function showError(msg) {
   document.getElementById("error-msg").textContent = msg;
   document.querySelectorAll(".analyse-btn").forEach(b => b.disabled = false);
 }
-
-// Re-enable buttons after results render
-const _origShowResults = showResults;
 
 // ── Field value helpers ────────────────────────────────────────────────────
 function val(id)   { return document.getElementById(id)?.value ?? ""; }
